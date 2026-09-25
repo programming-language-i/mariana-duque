@@ -26,8 +26,7 @@ Responder en una o dos líneas.
 5. ¿Por qué 4 hilos que duermen 1 s cada uno tardan ~1 s en total y no ~0,25 s? Porque el time sleep libera el GIL permitiendo que los hilos duerman en paralelo y el tiempo total es igual al tiempo individual no a la suma.
 6. Al crear un hilo por herencia, ¿qué método se sobrescribe y cuál nunca? ¿Por qué? Se sobre escribe el método run() pero nunca se sobreescribe el método start(), porque este crea el hilo del sistema operativo y se llama internamente run().
 7. ¿Qué pasa con un hilo daemon cuando termina el hilo principal? ¿Qué **no** se ejecuta? No se ejecuta ningún bloque de código pendiente después de ese punto.
-8. Completar la regla del curso: *hilos para , procesos para*. Los hilos sirven para consultas en las bases de datos y peticiones de red etc. Los procesos sirven para procesamiento de imagenes machine learning etc.
-
+8. Completar la regla del curso: *hilos para , procesos para*. Los hilos para esperar y procesos para calcular.
 ---
 
 ## Parte B — Predecir la salida
