@@ -2,8 +2,8 @@
 
 """
 El demon true sirve para que el hilo no se ejecute de manera secuencial, es el hilo principal el que decide cuando
- termina la ejecución del programa.
- Y el finally se ejecuta cuando el hilo termina, aunque el hilo principal haya terminado antes.
+termina la ejecución del programa.
+Y el finally se ejecuta cuando el hilo termina, aunque el hilo principal haya terminado antes.
 """
 import threading
 import time
