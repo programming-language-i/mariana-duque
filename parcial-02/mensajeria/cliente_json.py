@@ -1,108 +1,168 @@
 """
-PARCIAL 2 · Cliente de consola para el Nivel 3 (completo: no se modifica)
+PARCIAL 2 · Servidor para el Nivel 3 (mensajes JSON).
 
-    python3 -m mensajeria.cliente_json camilo            se conecta al puerto 8000
-    python3 -m mensajeria.cliente_json camilo 8050       o al que se le diga
-
-Igual que cliente.py, pero después del saludo cada trama es un objeto JSON:
-
-    texto                    →  {"tipo": "mensaje", "contenido": "texto"}
-    /privado luis texto      →  {"tipo": "privado", "destino": "luis", "contenido": "texto"}
-
-El cliente no envía emisor ni timestamp: los pone el servidor. Se sale con 0.
+    python3 -m mensajeria.servidor_json [puerto]
 """
 
 import json
 import socket
 import sys
 import threading
+from datetime import datetime
 
 from mensajeria.protocolo import enviar_mensaje, recibir_mensaje
 
 HOST = "127.0.0.1"
 PUERTO = 8000
 
+# Diccionario de clientes conectados: {nombre: socket}
+clientes: dict[str, socket.socket] = {}
+candado = threading.Lock()
 
-def mostrar(texto: str) -> str:
-    """Convierte una trama del servidor en la línea que se muestra."""
+
+def enviar_json(sock: socket.socket, datos: dict) -> None:
+    """Serializa un diccionario a JSON y lo envía por el socket."""
     try:
-        datos = json.loads(texto)
-        tipo = datos.get("tipo")
-        if tipo == "mensaje":
-            return f"[#{datos.get('canal')}] {datos.get('emisor')}: {datos.get('contenido')}"
-        if tipo == "privado":
-            return f"[privado] {datos.get('emisor')}: {datos.get('contenido')}"
-        if tipo == "error":
-            return f"[error] {datos.get('detalle')}"
-    except (json.JSONDecodeError, AttributeError):
+        enviar_mensaje(sock, json.dumps(datos, ensure_ascii=False))
+    except OSError:
         pass
-    return f"[sin formato] {texto}"
 
 
-def recibir_mensajes(conexion: socket.socket) -> None:
-    while True:
+def enviar_error(sock: socket.socket, detalle: str) -> None:
+    """Envía una trama de error al cliente que hizo un pedido inválido."""
+    enviar_json(sock, {"tipo": "error", "detalle": detalle})
+
+
+def atender_cliente(conexion: socket.socket) -> None:
+    """Ciclo de vida de cada cliente conectado."""
+    nombre = None
+    try:
+        # 1. Fase de saludo y registro (texto plano)
+        recibido = recibir_mensaje(conexion)
+        if not recibido:
+            return
+        candidato = recibido.strip()
+        if not candidato:
+            enviar_mensaje(conexion, "ERROR: Nombre vacío")
+            return
+
+        with candado:
+            if candidato in clientes:
+                enviar_mensaje(conexion, "ERROR: Nombre en uso")
+                return
+            nombre = candidato
+            clientes[nombre] = conexion
+
+        enviar_mensaje(conexion, "OK")
+
+        # 2. Fase de mensajería JSON
+        while True:
+            trama = recibir_mensaje(conexion)
+            if trama is None:
+                break
+
+            # Paso 5: Validar que la trama sea un objeto JSON válido
+            try:
+                pedido = json.loads(trama)
+            except json.JSONDecodeError:
+                # Se descarta el JSON dañado (o se envía error) y la conexión sigue
+                continue
+
+            if not isinstance(pedido, dict):
+                enviar_error(conexion, "El pedido debe ser un objeto JSON.")
+                continue
+
+            tipo = pedido.get("tipo")
+            contenido = pedido.get("contenido")
+
+            # Paso 4: Validar que el tipo sea conocido
+            if tipo not in ("mensaje", "privado"):
+                enviar_error(conexion, f"Tipo de pedido desconocido: {tipo!r}")
+                continue
+
+            # Paso 4: Validar que exista contenido válido
+            if not isinstance(contenido, str) or not contenido:
+                enviar_error(conexion, "El mensaje debe tener contenido.")
+                continue
+
+            # Paso 1 y 3: El servidor genera el timestamp y fuerza el emisor real
+            ahora = datetime.now().isoformat(timespec="seconds")
+
+            if tipo == "mensaje":
+                respuesta = {
+                    "tipo": "mensaje",
+                    "emisor": nombre,
+                    "canal": "general",
+                    "contenido": contenido,
+                    "timestamp": ahora,
+                }
+                with candado:
+                    destinos = [
+                        sock for usr, sock in clientes.items() if usr != nombre
+                    ]
+                for sock in destinos:
+                    enviar_json(sock, respuesta)
+
+            elif tipo == "privado":
+                destino = pedido.get("destino")
+                if not isinstance(destino, str) or not destino:
+                    enviar_error(conexion, "Falta especificar el destinatario.")
+                    continue
+
+                # Paso 4: No se permite enviarse privados a uno mismo
+                if destino == nombre:
+                    enviar_error(conexion, "No puedes enviarte un privado a ti mismo.")
+                    continue
+
+                with candado:
+                    sock_destino = clientes.get(destino)
+
+                # Paso 4: Validar que el destinatario esté conectado
+                if sock_destino is None:
+                    enviar_error(conexion, f"El usuario '{destino}' no está conectado.")
+                    continue
+
+                # Paso 2 y 3: Enviar privado solo al destino con el emisor real
+                respuesta = {
+                    "tipo": "privado",
+                    "emisor": nombre,
+                    "destino": destino,
+                    "contenido": contenido,
+                    "timestamp": ahora,
+                }
+                enviar_json(sock_destino, respuesta)
+
+    except OSError:
+        pass
+    finally:
+        if nombre is not None:
+            with candado:
+                if clientes.get(nombre) is conexion:
+                    del clientes[nombre]
         try:
-            texto = recibir_mensaje(conexion)
+            conexion.close()
         except OSError:
-            texto = None
-        if texto is None:
-            print("\nServidor desconectado. Escriba 0 para salir.")
-            break
-        print(f"\n{mostrar(texto)}")
-        print("> ", end="", flush=True)
-
-
-def a_pedido(texto: str) -> dict[str, str] | None:
-    """Traduce lo que se escribió en la consola al objeto que se envía."""
-    if not texto.startswith("/privado"):
-        return {"tipo": "mensaje", "contenido": texto}
-    partes = texto.split(maxsplit=2)
-    if len(partes) < 3:
-        print("Uso: /privado <destino> <texto>")
-        return None
-    return {"tipo": "privado", "destino": partes[1], "contenido": partes[2]}
+            pass
 
 
 def main() -> None:
-    if len(sys.argv) < 2:
-        print("Uso: python3 -m mensajeria.cliente_json <nombre> [puerto]")
-        return
-    nombre = sys.argv[1]
-    puerto = int(sys.argv[2]) if len(sys.argv) > 2 else PUERTO
-    sys.stdout.reconfigure(
-        errors="replace"
-    )  # una consola sin emojis no tumba al cliente
+    puerto = int(sys.argv[1]) if len(sys.argv) > 1 else PUERTO
+    sys.stdout.reconfigure(errors="replace")
 
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as cliente:
-        cliente.connect((HOST, puerto))
-        enviar_mensaje(cliente, nombre)  # el saludo no cambia: texto plano
-        respuesta = recibir_mensaje(cliente)
-        if respuesta != "OK":
-            print(f"El servidor respondió: {respuesta}")
-            return
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as servidor:
+        servidor.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        servidor.bind((HOST, puerto))
+        servidor.listen()
+        print(f"Servidor JSON escuchando en {HOST}:{puerto}...")
 
-        print(
-            f"Conectado como {nombre}. Texto o /privado <destino> <texto>; 0 para terminar."
-        )
-        threading.Thread(target=recibir_mensajes, args=(cliente,), daemon=True).start()
-
-        while True:
-            try:
-                texto = input("> ")
-            except (EOFError, KeyboardInterrupt):
-                break
-            if texto == "0":
-                break
-            if not texto:
-                continue
-            pedido = a_pedido(texto)
-            if pedido is None:
-                continue
-            try:
-                enviar_mensaje(cliente, json.dumps(pedido, ensure_ascii=False))
-            except OSError:
-                print("No se pudo enviar: la conexión se cerró.")
-                break
+        try:
+            while True:
+                conexion, _ = servidor.accept()
+                threading.Thread(
+                    target=atender_cliente, args=(conexion,), daemon=True
+                ).start()
+        except KeyboardInterrupt:
+            print("\nDeteniendo el servidor.")
 
 
 if __name__ == "__main__":
